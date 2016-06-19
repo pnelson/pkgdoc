@@ -4,42 +4,47 @@ package pkgdoc
 import (
 	"bytes"
 	"go/ast"
+	"go/build"
 	"go/doc"
 	"go/parser"
 	"go/printer"
 	"go/token"
 	"go/types"
 	"html/template"
+	"io/ioutil"
+	"os"
+	"path/filepath"
 
 	"golang.org/x/tools/go/loader"
 )
 
 // Package represents package documentation.
 type Package struct {
-	Name       string
-	ImportPath string
-	Doc        Doc
-	Synopsis   string
-	Constants  []Value
-	Variables  []Value
-	Functions  []Function
-	Types      []Type
+	Name        string
+	ImportPath  string
+	Doc         Doc
+	Synopsis    string
+	Constants   []Value
+	Variables   []Value
+	Functions   []Function
+	Types       []Type
+	SubPackages []string
 }
 
 // New returns a new Package.
 //
 // The package is loaded from source and must exist on the file system.
-func New(repo string) (Package, error) {
+func New(name string) (Package, error) {
 	conf := &loader.Config{
 		TypeChecker: types.Config{Error: func(err error) {}},
 		ParserMode:  parser.ParseComments,
 	}
-	conf.Import(repo)
+	conf.Import(name)
 	prog, err := conf.Load()
 	if err != nil {
 		return Package{}, err
 	}
-	pkg := prog.Package(repo)
+	pkg := prog.Package(name)
 	files := make(map[string]*ast.File)
 	for _, file := range pkg.Files {
 		name := prog.Fset.Position(file.Pos()).Filename
@@ -48,14 +53,19 @@ func New(repo string) (Package, error) {
 	apkg, _ := ast.NewPackage(prog.Fset, files, nil, nil) // non-applicable error
 	dpkg := doc.New(apkg, pkg.Pkg.Path(), 0)
 	pdoc := Package{
-		Name:       dpkg.Name,
-		ImportPath: dpkg.ImportPath,
-		Doc:        Doc(dpkg.Doc),
-		Synopsis:   doc.Synopsis(dpkg.Doc),
-		Constants:  pkgValues(dpkg.Consts, prog.Fset),
-		Variables:  pkgValues(dpkg.Vars, prog.Fset),
-		Functions:  pkgFunctions(dpkg.Funcs, prog.Fset),
-		Types:      pkgTypes(dpkg.Types, prog.Fset),
+		Name:        dpkg.Name,
+		ImportPath:  dpkg.ImportPath,
+		Doc:         Doc(dpkg.Doc),
+		Synopsis:    doc.Synopsis(dpkg.Doc),
+		Constants:   pkgValues(dpkg.Consts, prog.Fset),
+		Variables:   pkgValues(dpkg.Vars, prog.Fset),
+		Functions:   pkgFunctions(dpkg.Funcs, prog.Fset),
+		Types:       pkgTypes(dpkg.Types, prog.Fset),
+		SubPackages: make([]string, 0),
+	}
+	err = getSubPackages(&pdoc)
+	if err != nil {
+		return pdoc, err
 	}
 	return pdoc, nil
 }
@@ -149,4 +159,42 @@ func newType(t *doc.Type, fset *token.FileSet) Type {
 		Functions: pkgFunctions(t.Funcs, fset),
 		Methods:   pkgFunctions(t.Methods, fset),
 	}
+}
+
+func getSubPackages(p *Package) error {
+	root := filepath.Join(build.Default.GOPATH, "src", p.ImportPath)
+	fis, err := ioutil.ReadDir(root)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		root = filepath.Join(build.Default.GOROOT, "src", p.ImportPath)
+		fis, err = ioutil.ReadDir(root)
+		if err != nil {
+			return err
+		}
+	}
+	for _, fi := range fis {
+		if fi.IsDir() {
+			dir := fi.Name()
+			path := filepath.Join(root, dir)
+			if hasGoFiles(path, fi) {
+				p.SubPackages = append(p.SubPackages, dir)
+			}
+		}
+	}
+	return nil
+}
+
+func hasGoFiles(path string, fi os.FileInfo) bool {
+	fis, err := ioutil.ReadDir(path)
+	if err != nil {
+		return false
+	}
+	for _, fi := range fis {
+		if filepath.Ext(fi.Name()) == ".go" {
+			return true
+		}
+	}
+	return false
 }
